@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from 'recharts'
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 
 /* ---------- constants ---------- */
 const SUBJ = ['Physics', 'Chemistry', 'Maths']
@@ -44,7 +44,6 @@ const END = 'I conclude my day by signing this End of contract I affirm that I w
 const STATUS_CYCLE = ['Not started', 'In progress', 'Done']
 const TASK_CYCLE = ['Not started', 'Pending', 'Completed']
 const SYL_W = { 'Not started': 0, Learning: 33, Practiced: 66, Revised: 100 }
-const WT = { High: 3, Med: 2, Low: 1 }
 // Approximate high-weightage chapters from past JEE Main trends. Change any chapter's weightage in the tracker.
 const JEE_HIGH = new Set(['Laws of Motion', 'Work, Energy and Power', 'Rotational Motion', 'Thermodynamics', 'Electrostatics', 'Current Electricity', 'Magnetic Effects of Current and Magnetism', 'Electromagnetic Induction and Alternating Currents', 'Optics', 'Dual Nature of Matter and Radiation', 'Atoms and Nuclei', 'Chemical Bonding and Molecular Structure', 'Chemical Thermodynamics', 'Equilibrium', 'Redox Reactions and Electrochemistry', 'Coordination Compounds', 'Some Basic Principles of Organic Chemistry', 'Organic Compounds Containing Oxygen', 'p-Block Elements', 'd- and f-Block Elements', 'Complex Numbers and Quadratic Equations', 'Matrices and Determinants', 'Sequences and Series', 'Limits, Continuity and Differentiability', 'Integral Calculus', 'Coordinate Geometry (Straight Lines)', 'Conic Sections', 'Vector Algebra', 'Three Dimensional Geometry', 'Statistics and Probability'])
 // JEE Main chapter list (NTA syllabus). Edit, delete or add chapters freely.
@@ -64,35 +63,47 @@ const pct = (a, t) => (t ? Math.round((a / t) * 100) : null)
 const next = (list, v) => list[(list.indexOf(v) + 1) % list.length]
 const withStatus = (tasks, id, status) => tasks.map((x) => (x.id === id ? { ...x, status, doneOn: status === 'Completed' ? ymd() : null } : x))
 
-// --- syllabus sync + forgetting curve ---
+// --- syllabus sync ---
 const norm = (x) => x.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()
+const stemsMatch = (a, b) => {
+  if (a.includes(b) || b.includes(a)) return true
+  const wa = a.split(' ').filter((w) => w.length >= 5)
+  const wb = b.split(' ').filter((w) => w.length >= 5)
+  return wa.some((x) => wb.some((y) => x.slice(0, 6) === y.slice(0, 6)))
+}
 const matchTasks = (c, tasks) => tasks.filter((t) => {
   if (t.subject !== c.subject) return false
   const k = norm(t.name), n = norm(c.name)
-  return k.length >= 4 && (k.includes(n) || n.includes(k))
+  return k.length >= 4 && stemsMatch(k, n)
 })
+const findMatchedChapter = (task, syl) => {
+  if (!task?.name) return null
+  const k = norm(task.name)
+  if (k.length < 4) return null
+  return syl.find((c) => c.subject === task.subject && stemsMatch(k, norm(c.name))) || null
+}
+const taskLevel = (t) => {
+  if (t.stage === 'Revised' || t.stage === 'Revise + Practise') return 'Revised'
+  if (t.stage === 'Practiced') return 'Practiced'
+  if (t.stage === 'Learning') return 'Learning'
+  const nm = t.name.toLowerCase()
+  return /revis/.test(nm) ? 'Revised' : /practi|pyq|dpp|problem|question|solve|mcq|sheet/.test(nm) ? 'Practiced' : 'Learning'
+}
 // Chapter status = highest of: manual status, and what completed/pending tasks named after the chapter say.
-// Task words: "revise" -> Revised, "practice/PYQ/DPP/questions" -> Practiced, anything else completed -> Learning.
+// Task words: "revise" -> Revised, "practice/practise/PYQ/DPP/questions" -> Practiced, anything else completed -> Learning.
 function derive(c, tasks) {
   let st = 'Not started'
   const dates = new Set(c.revs || [])
   matchTasks(c, tasks).forEach((t) => {
-    const s = tStatus(t), nm = t.name.toLowerCase()
+    const s = tStatus(t)
     if (s === 'Completed') {
       dates.add(t.doneOn || t.deadline)
-      const lv = /revis/.test(nm) ? 'Revised' : /practi|pyq|dpp|problem|question/.test(nm) ? 'Practiced' : 'Learning'
+      const lv = taskLevel(t)
       if (SYL_CYCLE.indexOf(lv) > SYL_CYCLE.indexOf(st)) st = lv
     } else if (s === 'Pending' && st === 'Not started') st = 'Learning'
   })
   const status = SYL_CYCLE.indexOf(st) > SYL_CYCLE.indexOf(c.status) ? st : c.status
   return { status, dates: [...dates].filter(Boolean).sort() }
-}
-// Ebbinghaus: R = e^(-t/S). Stability S starts at 2.5 days and doubles with every study/revision day.
-function retention(dates, today) {
-  if (!dates.length) return null
-  const S = 2.5 * Math.pow(2, dates.length - 1)
-  const t = Math.max(0, (new Date(today) - new Date(dates[dates.length - 1])) / 864e5)
-  return { S, t, R: Math.exp(-t / S) }
 }
 
 function useLS(key, init) {
@@ -127,6 +138,7 @@ const Check = ({ on, set, label }) => (
 /* ---------- app ---------- */
 export default function App() {
   const today = ymd()
+  const [page, setPage] = useState('dashboard')
   const [days, setDays] = useLS('jee_days', {})
   const [qs, setQs] = useLS('jee_questions', [])
   const [tasks, setTasks] = useLS('jee_tasks', [])
@@ -138,6 +150,7 @@ export default function App() {
   const day = days[today] || {}
   const setDay = (patch) => setDays({ ...days, [today]: { ...day, ...patch } })
   const left = exam ? Math.ceil((new Date(exam) - new Date(today)) / 864e5) : null
+  const openTasks = tasks.filter((t) => tStatus(t) !== 'Completed').length
 
   // contract streak: consecutive days with both signed (today may still be pending)
   let streak = 0
@@ -149,10 +162,26 @@ export default function App() {
 
   return (
     <div className="min-h-screen px-4 py-5 max-w-[1500px] mx-auto">
-      <header className="flex flex-wrap items-end justify-between gap-3 mb-5">
-        <div>
-          <h1 className="text-xl font-semibold">JEE Command Center</h1>
-          <p className="text-xs text-zinc-400 mt-1">{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+      <header className="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <div className="flex flex-wrap items-center gap-4">
+          <div>
+            <h1 className="text-xl font-semibold">JEE Command Center</h1>
+            <p className="text-xs text-zinc-400 mt-0.5">{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+          </div>
+          <nav className="flex items-center gap-1 rounded-lg border border-[#2f2f2f] bg-[#202020] p-1 text-xs">
+            <button
+              onClick={() => setPage('dashboard')}
+              className={`rounded px-3 py-1 transition-colors ${page === 'dashboard' ? 'bg-zinc-700 text-zinc-100 font-medium' : 'text-zinc-400 hover:text-zinc-200'}`}
+            >
+              Dashboard
+            </button>
+            <button
+              onClick={() => setPage('tasks')}
+              className={`rounded px-3 py-1 transition-colors ${page === 'tasks' ? 'bg-zinc-700 text-zinc-100 font-medium' : 'text-zinc-400 hover:text-zinc-200'}`}
+            >
+              Tasks{openTasks > 0 ? ` (${openTasks})` : ''}
+            </button>
+          </nav>
         </div>
         <div className="flex items-center gap-3 text-xs">
           <span className="text-zinc-400">Exam date</span>
@@ -162,25 +191,31 @@ export default function App() {
         </div>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-3 items-start">
-        <div>
-          <ExamClock exam={exam} now={now} src={src} />
-          <Schedule day={day} setDay={setDay} tasks={tasks} today={today} />
-          <Tasks tasks={tasks} setTasks={setTasks} today={today} />
-        </div>
-        <div>
-          <Tracker qs={qs} setQs={setQs} today={today} />
-        </div>
-        <div>
-          <Contract day={day} setDay={setDay} last7={last7} />
-          <LogNote day={day} setDay={setDay} />
-          <Syllabus syl={syl} setSyl={setSyl} today={today} tasks={tasks} />
-        </div>
-      </div>
+      {page === 'tasks' ? (
+        <TasksPage tasks={tasks} setTasks={setTasks} today={today} syl={syl} onBack={() => setPage('dashboard')} />
+      ) : (
+        <>
+          <div className="grid gap-4 lg:grid-cols-3 items-start">
+            <div>
+              <Schedule day={day} setDay={setDay} tasks={tasks} today={today} />
+              <ExamClock exam={exam} now={now} src={src} />
+              <TasksSummary tasks={tasks} setTasks={setTasks} today={today} syl={syl} onOpen={() => setPage('tasks')} />
+            </div>
+            <div>
+              <Tracker qs={qs} setQs={setQs} today={today} />
+            </div>
+            <div>
+              <Contract day={day} setDay={setDay} last7={last7} />
+              <LogNote day={day} setDay={setDay} />
+              <Syllabus syl={syl} setSyl={setSyl} today={today} tasks={tasks} />
+            </div>
+          </div>
 
-      <div className="mt-4">
-        <UpcomingTests tests={tests} setTests={setTests} tasks={tasks} setTasks={setTasks} today={today} />
-      </div>
+          <div className="mt-4">
+            <UpcomingTests tests={tests} setTests={setTests} tasks={tasks} setTasks={setTasks} today={today} />
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -290,38 +325,133 @@ function ExamClock({ exam, now, src }) {
   const target = exam ? Date.parse(exam + 'T09:00:00+05:30') : null
   const R = target ? Math.max(0, target - t) : 0
   const d = Math.floor(R / 864e5), h = Math.floor(R / 36e5) % 24, m = Math.floor(R / 6e4) % 60, sec = Math.floor(R / 1e3) % 60
-  const aS = ((R / 1e3) % 60) * 6, aM = ((R / 6e4) % 60) * 6, aH = ((R / 36e5) % 12) * 30
+  const fracSec = (R / 1e3) % 60
+  const fracMin = (R / 6e4) % 60
+  const fracHr = (R / 36e5) % 24
   const p2 = (n) => String(n).padStart(2, '0')
-  const hand = (len, w, a, color, tail = 0) => <line x1="100" y1={100 + tail} x2="100" y2={100 - len} stroke={color} strokeWidth={w} strokeLinecap="round" transform={`rotate(${a} 100 100)`} />
+
+  const cx = 190, cy = 190
+  const daySlots = Array.from({ length: 16 }, (_, i) => {
+    const off = i <= 8 ? i : i - 16
+    const val = d + off
+    return { i, angle: i * 22.5, label: val >= 0 ? `${val}d` : '' }
+  })
+
   return (
     <Panel title="Time left for exam" right={<span className="text-[11px] text-zinc-500">{src}</span>}>
       {!exam ? <p className="text-xs text-zinc-500">Set your exam date in the header to start the countdown.</p> : (
         <>
-          <svg viewBox="0 0 200 200" className="w-44 h-44 mx-auto">
-            <circle cx="100" cy="100" r="97" fill="#191919" stroke="#2f2f2f" strokeWidth="2" />
-            {Array.from({ length: 60 }, (_, i) => {
-              const a = (i * 6 * Math.PI) / 180, r2 = i % 5 === 0 ? 86 : 90
-              return <line key={i} x1={100 + 94 * Math.sin(a)} y1={100 - 94 * Math.cos(a)} x2={100 + r2 * Math.sin(a)} y2={100 - r2 * Math.cos(a)} stroke={i % 5 === 0 ? '#888' : '#444'} strokeWidth={i % 5 === 0 ? 2 : 1} />
-            })}
-            {Array.from({ length: 12 }, (_, i) => {
-              const n = i + 1, a = (n * 30 * Math.PI) / 180
-              return <text key={n} x={100 + 72 * Math.sin(a)} y={100 - 72 * Math.cos(a) + 4} textAnchor="middle" fontSize="11" fill="#aaa">{n}</text>
-            })}
-            {hand(52, 4, aH, '#e6e6e6')}
-            {hand(74, 3, aM, '#60a5fa')}
-            {hand(82, 1.5, aS, '#fb923c', 16)}
-            <circle cx="100" cy="100" r="4" fill="#fb923c" />
+          <svg viewBox="0 0 380 380" className="w-full max-w-[270px] aspect-square mx-auto block select-none">
+            <defs>
+              <clipPath id="exam-clock-dial">
+                <circle cx={cx} cy={cy} r="181" />
+              </clipPath>
+              <clipPath id="exam-clock-hub">
+                <circle cx={cx} cy={cy} r="13" />
+              </clipPath>
+            </defs>
+
+            <circle cx={cx} cy={cy} r="182" fill="#0c1016" stroke="#0284c7" strokeWidth="1.5" strokeOpacity="0.75" />
+
+            <g clipPath="url(#exam-clock-dial)" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
+              {/* Days ring */}
+              <g transform={`translate(${cx}, ${cy})`}>
+                {daySlots.map((slot) => slot.label && (
+                  <text
+                    key={slot.i}
+                    x={56}
+                    y={0}
+                    fill="#155e75"
+                    fontSize="8.5"
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    transform={`rotate(${slot.angle})`}
+                  >
+                    {slot.label}
+                  </text>
+                ))}
+              </g>
+
+              {/* Hours ring (00-23) */}
+              <g transform={`translate(${cx}, ${cy}) rotate(${-fracHr * 15})`}>
+                {Array.from({ length: 24 }, (_, i) => (
+                  <text
+                    key={i}
+                    x={92}
+                    y={0}
+                    fill="#155e75"
+                    fontSize="8.5"
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    transform={`rotate(${i * 15})`}
+                  >
+                    {p2(i)}
+                  </text>
+                ))}
+              </g>
+
+              {/* Minutes ring (00-59) */}
+              <g transform={`translate(${cx}, ${cy}) rotate(${-fracMin * 6})`}>
+                {Array.from({ length: 60 }, (_, i) => (
+                  <text
+                    key={i}
+                    x={126}
+                    y={0}
+                    fill="#155e75"
+                    fontSize="7.5"
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    transform={`rotate(${i * 6})`}
+                  >
+                    {p2(i)}
+                  </text>
+                ))}
+              </g>
+
+              {/* Seconds ring (00-59) */}
+              <g transform={`translate(${cx}, ${cy}) rotate(${-fracSec * 6})`}>
+                {Array.from({ length: 60 }, (_, i) => (
+                  <text
+                    key={i}
+                    x={160}
+                    y={0}
+                    fill="#155e75"
+                    fontSize="7.5"
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    transform={`rotate(${i * 6})`}
+                  >
+                    {p2(i)}
+                  </text>
+                ))}
+              </g>
+
+              {/* Active horizontal cyan highlight bar */}
+              <rect x={cx} y={cy - 13} width="184" height="26" fill="#075985" />
+              <line x1={cx} y1={cy - 13} x2="374" y2={cy - 13} stroke="#0ea5e9" strokeWidth="0.75" strokeOpacity="0.65" />
+              <line x1={cx} y1={cy + 13} x2="374" y2={cy + 13} stroke="#0ea5e9" strokeWidth="0.75" strokeOpacity="0.65" />
+
+              <g fill="#f8fafc" fontSize="11.5" fontWeight="600" textAnchor="middle" dominantBaseline="central">
+                <text x={cx + 56} y={cy}>{d}d</text>
+                <text x={cx + 92} y={cy}>{p2(h)}</text>
+                <text x={cx + 109} y={cy} fill="#bae6fd">:</text>
+                <text x={cx + 126} y={cy}>{p2(m)}</text>
+                <text x={cx + 143} y={cy} fill="#bae6fd">:</text>
+                <text x={cx + 160} y={cy}>{p2(sec)}</text>
+              </g>
+            </g>
+
+            {/* Center hub */}
+            <circle cx={cx} cy={cy} r="16" fill="#0c1016" stroke="#0ea5e9" strokeWidth="1.2" strokeOpacity="0.8" />
+            <g clipPath="url(#exam-clock-hub)">
+              <rect x={cx - 13} y={cy - 13} width="26" height="8.7" fill="#FF9933" />
+              <rect x={cx - 13} y={cy - 4.3} width="26" height="8.6" fill="#FFFFFF" />
+              <rect x={cx - 13} y={cy + 4.3} width="26" height="8.7" fill="#138808" />
+              <circle cx={cx} cy={cy} r="3" fill="none" stroke="#000080" strokeWidth="0.8" />
+            </g>
           </svg>
-          <div className="grid grid-cols-4 gap-2 text-center mt-3">
-            {[['Days', d], ['Hours', h], ['Minutes', m], ['Seconds', sec]].map(([l, v]) => (
-              <div key={l} className="rounded border border-[#2f2f2f] py-2">
-                <div className="text-lg font-semibold tabular-nums">{p2(v)}</div>
-                <div className="text-[10px] text-zinc-500">{l}</div>
-              </div>
-            ))}
-          </div>
-          <p className="text-center text-xs text-zinc-300 mt-2 tabular-nums">{d}:{p2(h)}:{p2(m)}:{p2(sec)}</p>
-          <p className="text-center text-[11px] text-zinc-500 mt-1">Counts down to 9:00 AM IST on exam day. Hands show the time remaining.</p>
+
+          <p className="text-center text-[11px] text-zinc-500 mt-2">Counts down to 9:00 AM IST on exam day.</p>
         </>
       )}
     </Panel>
@@ -356,41 +486,276 @@ function Schedule({ day, setDay, tasks, today }) {
   )
 }
 
-/* ---------- tasks ---------- */
-function Tasks({ tasks, setTasks, today }) {
-  const [f, setF] = useState({ name: '', subject: 'Physics', deadline: today, priority: 'Med', session: '' })
-  const add = () => { if (!f.name.trim()) return; setTasks([...tasks, { ...f, id: uid(), status: 'Not started' }]); setF({ ...f, name: '' }) }
-  const shown = [...tasks].sort((a, b) => (tStatus(a) === 'Completed') - (tStatus(b) === 'Completed') || a.deadline.localeCompare(b.deadline))
+/* ---------- tasks (dashboard summary + dedicated day-wise page) ---------- */
+function TaskAddForm({ tasks, setTasks, today, syl, defaultDate, compact }) {
+  const [f, setF] = useState({ name: '', subject: 'Physics', deadline: defaultDate || today, priority: 'Med', session: '', stage: 'Auto' })
+  useEffect(() => {
+    if (defaultDate) setF((prev) => ({ ...prev, deadline: defaultDate }))
+  }, [defaultDate])
+  const add = () => {
+    if (!f.name.trim()) return
+    const item = { ...f, id: uid(), status: 'Not started' }
+    if (item.stage === 'Auto') delete item.stage
+    setTasks([...tasks, item])
+    setF({ ...f, name: '' })
+  }
+  const chapterSuggestions = (syl.length ? syl.filter((c) => c.subject === f.subject).map((c) => c.name) : JEE_SYLLABUS[f.subject]) || []
+  const previewMatch = findMatchedChapter({ name: f.name, subject: f.subject }, syl)
+
   return (
-    <Panel title="Tasks">
-      <div className="grid grid-cols-[1fr_auto] gap-2 mb-3">
-        <input className={inp} placeholder="New task / topic" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && add()} />
-        <button className={btn} onClick={add}>Add</button>
-        <div className="col-span-2 grid grid-cols-2 gap-2">
-          <select className={inp} value={f.subject} onChange={(e) => setF({ ...f, subject: e.target.value })}>{SUBJ.map((s) => <option key={s}>{s}</option>)}</select>
-          <select className={inp} value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })}>{['High', 'Med', 'Low'].map((s) => <option key={s}>{s}</option>)}</select>
-          <input type="date" className={inp} value={f.deadline} onChange={(e) => setF({ ...f, deadline: e.target.value })} />
-          <select className={inp} value={f.session} onChange={(e) => setF({ ...f, session: e.target.value })}>
-            <option value="">Select session</option>
-            {BLOCKS.filter((b) => b.study).map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
-          </select>
-        </div>
+    <div className={compact ? 'grid grid-cols-[1fr_auto] gap-2' : 'grid gap-2 md:grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr_auto]'}>
+      <input
+        list="jee-task-chapters"
+        className={inp}
+        placeholder="Topic / task (e.g. Electrostatics revise & practise)"
+        value={f.name}
+        onChange={(e) => setF({ ...f, name: e.target.value })}
+        onKeyDown={(e) => e.key === 'Enter' && add()}
+      />
+      <datalist id="jee-task-chapters">
+        {chapterSuggestions.map((ch) => <option key={ch} value={ch} />)}
+      </datalist>
+      {compact && <button className={btn} onClick={add}>Add</button>}
+      <div className={compact ? 'col-span-2 grid grid-cols-2 sm:grid-cols-3 gap-2' : 'contents'}>
+        <select className={inp} value={f.subject} onChange={(e) => setF({ ...f, subject: e.target.value })}>{SUBJ.map((s) => <option key={s}>{s}</option>)}</select>
+        <select className={inp} value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })}>{['High', 'Med', 'Low'].map((s) => <option key={s}>{s}</option>)}</select>
+        <select className={inp} title="How completing this task updates syllabus status" value={f.stage} onChange={(e) => setF({ ...f, stage: e.target.value })}>
+          <option value="Auto">Auto (from name)</option>
+          <option value="Learning">Learning (33%)</option>
+          <option value="Practiced">Practise (66%)</option>
+          <option value="Revise + Practise">Revise + Practise (100%)</option>
+          <option value="Revised">Revise (100%)</option>
+        </select>
+        <input type="date" className={inp} value={f.deadline} onChange={(e) => setF({ ...f, deadline: e.target.value })} />
+        <select className={inp + (compact ? ' sm:col-span-2' : '')} value={f.session} onChange={(e) => setF({ ...f, session: e.target.value })}>
+          <option value="">Select session</option>
+          {BLOCKS.filter((b) => b.study).map((b) => <option key={b.id} value={b.id}>{b.label}</option>)}
+        </select>
       </div>
-      {shown.length === 0 && <p className="text-xs text-zinc-500">No tasks yet. Add one above.</p>}
-      {shown.map((t) => (
-        <div key={t.id} className="flex items-center gap-2 border-t border-[#2f2f2f] py-1.5 text-xs">
-          <Tag t={tStatus(t)} onClick={() => setTasks(withStatus(tasks, t.id, next(TASK_CYCLE, tStatus(t))))} />
-          <span className={`flex-1 ${tStatus(t) === 'Completed' ? 'line-through text-zinc-500' : ''}`}>{t.name}</span>
-          <Tag t={t.subject} /><Tag t={t.priority} />
-          <select className="bg-[#191919] border border-[#2f2f2f] rounded px-1 py-0.5 text-[11px] w-14" value={t.session || ''} onChange={(e) => setTasks(tasks.map((x) => x.id === t.id ? { ...x, session: e.target.value } : x))}>
-            <option value="">–</option>
-            {BLOCKS.filter((b) => b.study).map((b) => <option key={b.id} value={b.id}>S{b.label.slice(-1)}</option>)}
-          </select>
-          <span className={tStatus(t) !== 'Completed' && t.deadline < today ? 'text-red-400' : 'text-zinc-400'}>{t.deadline.slice(5)}</span>
-          <button className="text-zinc-500 hover:text-red-400" onClick={() => setTasks(tasks.filter((x) => x.id !== t.id))}>✕</button>
+      {!compact && <button className={btn} onClick={add}>Add task</button>}
+      {previewMatch && (
+        <p className={`${compact ? 'col-span-2' : 'md:col-span-7'} text-[11px] text-emerald-400/90`}>
+          Matches chapter: <span className="font-medium">{previewMatch.name}</span> → completing marks it <span className="font-medium">{taskLevel({ name: f.name, stage: f.stage === 'Auto' ? undefined : f.stage })}</span>
+        </p>
+      )}
+    </div>
+  )
+}
+
+function TasksSummary({ tasks, setTasks, today, syl, onOpen }) {
+  const scheduledDays = [...new Set(tasks.map((t) => t.deadline).filter(Boolean))].sort((a, b) => {
+    if (a === today) return -1
+    if (b === today) return 1
+    const aPast = a < today, bPast = b < today
+    if (aPast && !bPast) return 1
+    if (!aPast && bPast) return -1
+    return a.localeCompare(b)
+  })
+  const dayOptions = scheduledDays.includes(today) ? scheduledDays : [today, ...scheduledDays]
+  const [activeDay, setActiveDay] = useState(today)
+  const currentDay = dayOptions.includes(activeDay) ? activeDay : today
+
+  const dayTasks = [...tasks.filter((t) => t.deadline === currentDay)].sort((a, b) => (tStatus(a) === 'Completed') - (tStatus(b) === 'Completed'))
+  const dayDone = dayTasks.filter((t) => tStatus(t) === 'Completed').length
+  const pctDay = dayTasks.length ? Math.round((dayDone / dayTasks.length) * 100) : 0
+  const overdue = tasks.filter((t) => t.deadline < today && tStatus(t) !== 'Completed').length
+
+  const shortDay = (d) => d === today ? 'Today' : new Date(d + 'T00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+
+  return (
+    <Panel
+      title="Tasks"
+      right={
+        <button onClick={onOpen} className="rounded bg-zinc-700/60 hover:bg-zinc-600/70 px-2.5 py-1 text-xs text-zinc-200">
+          All days →
+        </button>
+      }
+    >
+      <TaskAddForm tasks={tasks} setTasks={setTasks} today={today} syl={syl} defaultDate={currentDay} compact />
+
+      <div className="mt-3 rounded border border-[#2f2f2f] bg-[#191919] p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <div className="flex flex-wrap items-center gap-1">
+            {dayOptions.map((d) => {
+              const cnt = tasks.filter((t) => t.deadline === d).length
+              const isOver = d < today && tasks.some((t) => t.deadline === d && tStatus(t) !== 'Completed')
+              return (
+                <button
+                  key={d}
+                  onClick={() => setActiveDay(d)}
+                  className={`rounded px-2 py-0.5 text-[11px] transition-colors ${currentDay === d ? 'bg-zinc-700 text-zinc-100 font-medium' : isOver ? 'text-red-300/80 hover:bg-zinc-800' : 'text-zinc-400 hover:bg-zinc-800'}`}
+                >
+                  {shortDay(d)}{cnt > 0 ? ` (${cnt})` : ''}
+                </button>
+              )
+            })}
+          </div>
+          <span className="text-[11px] text-zinc-400 tabular-nums">
+            {dayDone}/{dayTasks.length} done{overdue > 0 && currentDay === today ? ` · ${overdue} overdue` : ''}
+          </span>
         </div>
-      ))}
+
+        <div className="h-1.5 rounded bg-[#2f2f2f] overflow-hidden mb-2">
+          <div className="h-full rounded bg-green-500/80 transition-all" style={{ width: pctDay + '%' }} />
+        </div>
+
+        {dayTasks.length === 0 ? (
+          <p className="text-xs text-zinc-500 py-1">No tasks scheduled for {shortDay(currentDay)}.</p>
+        ) : (
+          <div>
+            {dayTasks.map((t) => {
+              const matched = findMatchedChapter(t, syl)
+              return (
+                <div key={t.id} className="flex items-center gap-2 border-t border-[#2f2f2f] py-1.5 text-xs">
+                  <Tag t={tStatus(t)} onClick={() => setTasks(withStatus(tasks, t.id, next(TASK_CYCLE, tStatus(t))))} />
+                  <div className="flex-1 min-w-0">
+                    <div className={`truncate ${tStatus(t) === 'Completed' ? 'line-through text-zinc-500' : ''}`}>{t.name}</div>
+                    {matched && (
+                      <div className="text-[10px] text-zinc-500 truncate">
+                        Syllabus: {matched.name} ({taskLevel(t)})
+                      </div>
+                    )}
+                  </div>
+                  <Tag t={t.subject} />
+                  <Tag t={t.priority} />
+                  <select className="bg-[#202020] border border-[#2f2f2f] rounded px-1 py-0.5 text-[11px] w-14" value={t.session || ''} onChange={(e) => setTasks(tasks.map((x) => x.id === t.id ? { ...x, session: e.target.value } : x))}>
+                    <option value="">–</option>
+                    {BLOCKS.filter((b) => b.study).map((b) => <option key={b.id} value={b.id}>S{b.label.slice(-1)}</option>)}
+                  </select>
+                  <button className="text-zinc-500 hover:text-red-400" onClick={() => setTasks(tasks.filter((x) => x.id !== t.id))}>✕</button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
     </Panel>
+  )
+}
+
+function TasksPage({ tasks, setTasks, today, syl, onBack }) {
+  const [filter, setFilter] = useState('All')
+  const [selectedDate, setSelectedDate] = useState(today)
+
+  const filtered = tasks.filter((t) => {
+    if (filter === 'Pending') return tStatus(t) !== 'Completed'
+    if (filter === 'Completed') return tStatus(t) === 'Completed'
+    return true
+  })
+
+  const grouped = filtered.reduce((acc, t) => {
+    const key = t.deadline || 'No date'
+    if (!acc[key]) acc[key] = []
+    acc[key].push(t)
+    return acc
+  }, {})
+
+  const dayKeys = Object.keys(grouped).sort((a, b) => {
+    if (a === today) return -1
+    if (b === today) return 1
+    const aPast = a < today, bPast = b < today
+    if (aPast && !bPast) return 1
+    if (!aPast && bPast) return -1
+    return a.localeCompare(b)
+  })
+
+  const formatDayLabel = (d) => {
+    if (d === 'No date') return { title: 'Unscheduled', badge: null }
+    const diff = Math.round((new Date(d) - new Date(today)) / 864e5)
+    const title = new Date(d + 'T00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })
+    const badge = diff === 0 ? 'Today' : diff === 1 ? 'Tomorrow' : diff === -1 ? 'Yesterday' : diff > 1 ? `in ${diff} days` : `${-diff} days ago`
+    return { title, badge, diff }
+  }
+
+  return (
+    <div className="space-y-4">
+      <Panel
+        title="Day-wise tasks"
+        right={
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex gap-1 text-[11px]">
+              {['All', 'Pending', 'Completed'].map((k) => (
+                <button key={k} onClick={() => setFilter(k)} className={`rounded px-2 py-1 ${filter === k ? 'bg-zinc-600 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}>{k}</button>
+              ))}
+            </div>
+            <button onClick={onBack} className={btn}>← Dashboard</button>
+          </div>
+        }
+      >
+        <TaskAddForm tasks={tasks} setTasks={setTasks} today={today} syl={syl} defaultDate={selectedDate} />
+      </Panel>
+
+      {dayKeys.length === 0 ? (
+        <div className="rounded-lg border border-[#2f2f2f] bg-[#202020] p-6 text-center text-xs text-zinc-500">
+          No tasks match this filter. Add a task above to create a day tile.
+        </div>
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 items-start">
+          {dayKeys.map((d) => {
+            const items = [...grouped[d]].sort((a, b) => (tStatus(a) === 'Completed') - (tStatus(b) === 'Completed'))
+            const doneN = items.filter((t) => tStatus(t) === 'Completed').length
+            const pctDay = Math.round((doneN / items.length) * 100)
+            const subjects = [...new Set(items.map((t) => t.subject))]
+            const { title, badge, diff } = formatDayLabel(d)
+            const hasOverdue = d < today && doneN < items.length
+            return (
+              <section key={d} className={`rounded-lg border bg-[#202020] p-4 ${d === today ? 'border-zinc-500/70' : hasOverdue ? 'border-red-500/40' : 'border-[#2f2f2f]'}`}>
+                <div className="flex items-start justify-between gap-2 mb-2">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-semibold">{title}</h3>
+                      {badge && (
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] ${d === today ? 'bg-blue-500/20 text-blue-300' : hasOverdue ? 'bg-red-500/20 text-red-300' : 'bg-zinc-700/60 text-zinc-300'}`}>
+                          {hasOverdue ? `Overdue · ${badge}` : badge}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1 mt-1.5">
+                      {subjects.map((s) => <Tag key={s} t={s} />)}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-xs text-zinc-300 tabular-nums">{doneN}/{items.length} done</div>
+                    {d !== 'No date' && (
+                      <button onClick={() => setSelectedDate(d)} className="text-[10px] text-zinc-500 hover:text-zinc-300 mt-0.5">
+                        + Add to day
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="h-1.5 rounded bg-[#2f2f2f] overflow-hidden mb-3">
+                  <div className="h-full rounded bg-green-500/80 transition-all" style={{ width: pctDay + '%' }} />
+                </div>
+                <div>
+                  {items.map((t) => {
+                    const matched = findMatchedChapter(t, syl)
+                    return (
+                      <div key={t.id} className="flex items-center gap-2 border-t border-[#2f2f2f] py-1.5 text-xs">
+                        <Tag t={tStatus(t)} onClick={() => setTasks(withStatus(tasks, t.id, next(TASK_CYCLE, tStatus(t))))} />
+                        <div className="flex-1 min-w-0">
+                          <div className={`truncate ${tStatus(t) === 'Completed' ? 'line-through text-zinc-500' : ''}`}>{t.name}</div>
+                          {matched && (
+                            <div className="text-[10px] text-zinc-500 truncate">
+                              Syllabus: {matched.name} ({taskLevel(t)})
+                            </div>
+                          )}
+                        </div>
+                        <Tag t={t.priority} />
+                        <select className="bg-[#191919] border border-[#2f2f2f] rounded px-1 py-0.5 text-[11px] w-14" value={t.session || ''} onChange={(e) => setTasks(tasks.map((x) => x.id === t.id ? { ...x, session: e.target.value } : x))}>
+                          <option value="">–</option>
+                          {BLOCKS.filter((b) => b.study).map((b) => <option key={b.id} value={b.id}>S{b.label.slice(-1)}</option>)}
+                        </select>
+                        <button className="text-zinc-500 hover:text-red-400" onClick={() => setTasks(tasks.filter((x) => x.id !== t.id))}>✕</button>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -548,55 +913,16 @@ function LogNote({ day, setDay }) {
   )
 }
 
-/* ---------- forgetting curve ---------- */
-function ForgettingCurve({ syl, tasks, today }) {
-  const [sel, setSel] = useState(null)
-  const rows = syl.map((c) => {
-    const r = retention(derive(c, tasks).dates, today)
-    return r && { c, r, pr: (1 - r.R) * WT[c.w || 'Med'] }
-  }).filter(Boolean).sort((a, b) => b.pr - a.pr)
-  const cur = rows.find((x) => x.c.id === sel) || rows[0]
-  const span = cur ? Math.max(30, Math.ceil(cur.r.t) + 3) : 30
-  const curve = cur ? Array.from({ length: span + 1 }, (_, d) => ({ d, R: Math.round(Math.exp(-d / cur.r.S) * 100) })) : []
-  const rc = (R) => (R < 0.5 ? 'bg-red-500/20 text-red-300' : R < 0.7 ? 'bg-yellow-500/20 text-yellow-300' : 'bg-green-500/20 text-green-300')
-  return (
-    <Panel title="Forgetting curve" right={<span className="text-[11px] text-zinc-500">revise below 70% retention</span>}>
-      {!cur ? <p className="text-xs text-zinc-500">Complete a task named after a chapter, or click a chapter's status tag, to start its curve.</p> : (
-        <>
-          <p className="text-[11px] text-zinc-500 mb-1">{cur.c.name}: memory fades after your last study day. Each revision makes it last about twice as long. The orange line is today.</p>
-          <div className="h-36 mb-3">
-            <ResponsiveContainer>
-              <LineChart data={curve}>
-                <CartesianGrid stroke="#2f2f2f" vertical={false} />
-                <XAxis dataKey="d" type="number" domain={[0, span]} tick={{ fontSize: 10, fill: '#888' }} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#888' }} width={28} />
-                <Tooltip contentStyle={{ background: '#202020', border: '1px solid #2f2f2f', fontSize: 11 }} labelFormatter={(d) => `Day ${d} after last study`} />
-                <ReferenceLine y={70} stroke="#666" strokeDasharray="4 4" />
-                <ReferenceLine x={Math.min(cur.r.t, span)} stroke="#fb923c" />
-                <Line dataKey="R" name="Retention %" stroke={HEX[cur.c.subject]} dot={false} strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-          <p className="text-[11px] text-zinc-500 mb-1">Revise in this order (low retention and high weightage first). Click a row to see its curve.</p>
-          {rows.slice(0, 10).map((x) => (
-            <div key={x.c.id} onClick={() => setSel(x.c.id)} className={`flex items-center gap-2 border-t border-[#2f2f2f] py-1.5 px-1 text-xs cursor-pointer ${x.c.id === cur.c.id ? 'bg-white/5' : ''}`}>
-              <span className="flex-1">{x.c.name}</span>
-              <Tag t={x.c.subject} /><Tag t={x.c.w || 'Med'} />
-              <span className={`rounded px-1.5 py-0.5 text-[11px] ${rc(x.r.R)}`}>{Math.round(x.r.R * 100)}%</span>
-            </div>
-          ))}
-        </>
-      )}
-    </Panel>
-  )
-}
 
 /* ---------- syllabus ---------- */
 function Syllabus({ syl, setSyl, today, tasks }) {
   const [f, setF] = useState({ name: '', subject: 'Physics' })
+  const [manage, setManage] = useState(false)
+  const [q, setQ] = useState('')
   const add = () => { if (!f.name.trim()) return; setSyl([...syl, { ...f, id: uid(), status: 'Not started', w: 'Med', revs: [] }]); setF({ ...f, name: '' }) }
   const bump = (c) => {
-    const status = next(SYL_CYCLE, c.status)
+    const curStatus = derive(c, tasks).status
+    const status = next(SYL_CYCLE, curStatus)
     setSyl(syl.map((x) => x.id === c.id ? { ...x, status, revs: status === 'Not started' ? [] : [...new Set([...(x.revs || []), today])] } : x))
   }
   const load = () => {
@@ -606,29 +932,77 @@ function Syllabus({ syl, setSyl, today, tasks }) {
     setSyl([...syl, ...add])
   }
   const overall = syl.length ? Math.round(syl.reduce((a, c) => a + SYL_W[derive(c, tasks).status], 0) / syl.length) : 0
+  const highList = syl.filter((c) => (c.w || 'Med') === 'High')
+  const highPct = highList.length ? Math.round(highList.reduce((a, c) => a + SYL_W[derive(c, tasks).status], 0) / highList.length) : 0
+  const missingDefault = SUBJ.reduce((n, sub) => n + JEE_SYLLABUS[sub].filter((ch) => !syl.some((c) => c.subject === sub && c.name.toLowerCase() === ch.toLowerCase())).length, 0)
+  const filtered = q.trim() ? syl.filter((c) => c.name.toLowerCase().includes(q.trim().toLowerCase()) || c.subject.toLowerCase().includes(q.trim().toLowerCase())) : []
+
   return (
-    <>
-      <Panel title="Syllabus tracker" right={<button className={btn} onClick={load}>Load JEE Main chapters</button>}>
-        <div className="mb-4">
-          <div className="flex justify-between text-xs mb-1"><span>Overall syllabus completed</span><span className="text-zinc-300">{overall}%</span></div>
-          <div className="h-2 rounded bg-[#2f2f2f]"><div className="h-full rounded bg-zinc-200" style={{ width: overall + '%' }} /></div>
-          <p className="text-[11px] text-zinc-500 mt-1">Not started 0%, Learning 33%, Practiced 66%, Revised 100% per chapter. It also updates from tasks: a completed task named after a chapter counts as Learning, with \u201cpractice\u201d, \u201cPYQ\u201d or \u201cDPP\u201d in the name as Practiced, and with \u201crevise\u201d as Revised.</p>
+    <Panel
+      title="Syllabus tracker"
+      right={
+        <div className="flex items-center gap-1.5">
+          {missingDefault > 0 && <button className={btn} onClick={load}>Load JEE chapters</button>}
+          {syl.length > 0 && (
+            <button onClick={() => setManage((v) => !v)} className="text-[11px] text-zinc-400 hover:text-zinc-200 px-1.5 py-1">
+              {manage ? 'Close' : `Manage (${syl.length})`}
+            </button>
+          )}
         </div>
-        <div className="flex gap-2 mb-3">
-          <input className={inp} placeholder="Add chapter" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && add()} />
-          <select className={inp + ' !w-28'} value={f.subject} onChange={(e) => setF({ ...f, subject: e.target.value })}>{SUBJ.map((s) => <option key={s}>{s}</option>)}</select>
-          <button className={btn} onClick={add}>Add</button>
+      }
+    >
+      <div className="mb-4">
+        <div className="flex justify-between text-xs mb-1">
+          <span>Overall syllabus completed</span>
+          <span className="text-zinc-300 tabular-nums">{overall}%{highList.length > 0 ? ` · High wt ${highPct}%` : ''}</span>
         </div>
+        <div className="h-2 rounded bg-[#2f2f2f] overflow-hidden"><div className="h-full rounded bg-zinc-200 transition-all" style={{ width: overall + '%' }} /></div>
+        <p className="text-[11px] text-zinc-500 mt-1.5">Syncs automatically from completed tasks (Learning 33% · Practiced 66% · Revised 100%).</p>
+      </div>
+
+      <div className="space-y-3 mb-4">
         {SUBJ.map((s) => {
           const list = syl.filter((c) => c.subject === s)
-          const p = list.length ? Math.round(list.reduce((a, c) => a + SYL_W[derive(c, tasks).status], 0) / list.length) : 0
+          const statuses = list.map((c) => derive(c, tasks).status)
+          const p = list.length ? Math.round(statuses.reduce((a, st) => a + SYL_W[st], 0) / list.length) : 0
+          const revisedN = statuses.filter((st) => st === 'Revised').length
+          const practicedN = statuses.filter((st) => st === 'Practiced').length
+          const learningN = statuses.filter((st) => st === 'Learning').length
           return (
-            <div key={s} className="mb-3">
-              <div className="flex items-center justify-between mb-1"><Tag t={s} /><span className="text-[11px] text-zinc-400">{p}% complete · {list.filter((c) => derive(c, tasks).status === 'Revised').length}/{list.length} revised</span></div>
-              <div className="h-1.5 rounded bg-[#2f2f2f] mb-1.5"><div className="h-full rounded" style={{ width: p + '%', background: HEX[s] }} /></div>
-              {list.map((c) => (
-                <div key={c.id} className="flex items-center gap-2 py-1 text-xs">
-                  <span className="flex-1">{c.name}</span>
+            <div key={s}>
+              <div className="flex items-center justify-between mb-1">
+                <Tag t={s} />
+                <span className="text-[11px] text-zinc-400 tabular-nums">
+                  {p}% · {revisedN}/{list.length} revised{practicedN ? ` · ${practicedN} practiced` : ''}{learningN ? ` · ${learningN} learning` : ''}
+                </span>
+              </div>
+              <div className="h-1.5 rounded bg-[#2f2f2f] overflow-hidden">
+                <div className="h-full rounded transition-all" style={{ width: p + '%', background: HEX[s] }} />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <div className="flex gap-2">
+        <input className={inp} placeholder="Add custom chapter" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} onKeyDown={(e) => e.key === 'Enter' && add()} />
+        <select className={inp + ' !w-28'} value={f.subject} onChange={(e) => setF({ ...f, subject: e.target.value })}>{SUBJ.map((s) => <option key={s}>{s}</option>)}</select>
+        <button className={btn} onClick={add}>Add</button>
+      </div>
+
+      {manage && (
+        <div className="mt-3 pt-3 border-t border-[#2f2f2f]">
+          <input className={inp + ' mb-2'} placeholder="Search stored chapters to edit status or weightage..." value={q} onChange={(e) => setQ(e.target.value)} />
+          {!q.trim() ? (
+            <p className="text-[11px] text-zinc-500">Type a chapter name above to inspect or update any of your {syl.length} stored chapters.</p>
+          ) : filtered.length === 0 ? (
+            <p className="text-[11px] text-zinc-500">No stored chapters match "{q}".</p>
+          ) : (
+            <div className="max-h-56 overflow-y-auto space-y-1">
+              {filtered.map((c) => (
+                <div key={c.id} className="flex items-center gap-2 py-1 text-xs border-t border-[#2f2f2f]/60">
+                  <span className="flex-1 truncate">{c.name}</span>
+                  <Tag t={c.subject} />
                   <select className="bg-[#191919] border border-[#2f2f2f] rounded px-1 py-0.5 text-[11px] w-16" title="Weightage" value={c.w || 'Med'} onChange={(e) => setSyl(syl.map((x) => x.id === c.id ? { ...x, w: e.target.value } : x))}>
                     {['High', 'Med', 'Low'].map((w) => <option key={w}>{w}</option>)}
                   </select>
@@ -637,10 +1011,9 @@ function Syllabus({ syl, setSyl, today, tasks }) {
                 </div>
               ))}
             </div>
-          )
-        })}
-      </Panel>
-      <ForgettingCurve syl={syl} tasks={tasks} today={today} />
-    </>
+          )}
+        </div>
+      )}
+    </Panel>
   )
 }
