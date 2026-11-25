@@ -106,6 +106,26 @@ function derive(c, tasks) {
   return { status, dates: [...dates].filter(Boolean).sort() }
 }
 
+const LOG_KEYS = ['well', 'distract', 'fix', 'mood']
+function pruneOldLogs(daysObj, minKeepDate) {
+  let changed = false
+  const nextDays = {}
+  for (const [k, v] of Object.entries(daysObj || {})) {
+    if (!v || typeof v !== 'object') continue
+    if (k < minKeepDate) {
+      const hasLog = LOG_KEYS.some((lk) => lk in v)
+      if (hasLog) changed = true
+      const rest = { ...v }
+      LOG_KEYS.forEach((lk) => delete rest[lk])
+      if (Object.keys(rest).length > 0) nextDays[k] = rest
+      else changed = true
+    } else {
+      nextDays[k] = v
+    }
+  }
+  return { nextDays, changed }
+}
+
 function useLS(key, init) {
   const [v, setV] = useState(() => {
     try { const s = localStorage.getItem(key); return s ? JSON.parse(s) : init } catch { return init }
@@ -138,6 +158,7 @@ const Check = ({ on, set, label }) => (
 /* ---------- app ---------- */
 export default function App() {
   const today = ymd()
+  const yesterday = daysAgo(1)
   const [page, setPage] = useState('dashboard')
   const [days, setDays] = useLS('jee_days', {})
   const [qs, setQs] = useLS('jee_questions', [])
@@ -147,8 +168,26 @@ export default function App() {
   const [tests, setTests] = useLS('jee_tests', [])
   const { now, src } = useServerTime()
 
+  useEffect(() => {
+    const { nextDays, changed } = pruneOldLogs(days, yesterday)
+    if (changed) setDays(nextDays)
+  }, [yesterday, days, setDays])
+
   const day = days[today] || {}
-  const setDay = (patch) => setDays({ ...days, [today]: { ...day, ...patch } })
+  const setDay = (patch) => {
+    const { nextDays } = pruneOldLogs({ ...days, [today]: { ...day, ...patch } }, yesterday)
+    setDays(nextDays)
+  }
+  const clearPrevLog = () => {
+    const prev = days[yesterday]
+    if (!prev) return
+    const rest = { ...prev }
+    LOG_KEYS.forEach((lk) => delete rest[lk])
+    const updated = { ...days }
+    if (Object.keys(rest).length > 0) updated[yesterday] = rest
+    else delete updated[yesterday]
+    setDays(updated)
+  }
   const left = exam ? Math.ceil((new Date(exam) - new Date(today)) / 864e5) : null
   const openTasks = tasks.filter((t) => tStatus(t) !== 'Completed').length
 
@@ -207,6 +246,7 @@ export default function App() {
             <div>
               <Contract day={day} setDay={setDay} last7={last7} />
               <LogNote day={day} setDay={setDay} />
+              <Reflect yesterday={yesterday} prevDay={days[yesterday]} onClear={clearPrevLog} />
               <Syllabus syl={syl} setSyl={setSyl} today={today} tasks={tasks} />
             </div>
           </div>
@@ -319,139 +359,42 @@ function useServerTime() {
   return { now, src }
 }
 
+function FlipUnit({ value, label }) {
+  return (
+    <div className="flex flex-col items-center">
+      <div className="relative w-full h-16 rounded-lg bg-black border border-[#2f2f2f] overflow-hidden flex items-center justify-center shadow-inner">
+        <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/[0.04] to-transparent pointer-events-none" />
+        <span key={value} className="animate-flip-tick relative z-10 text-2xl sm:text-3xl font-bold text-white tabular-nums tracking-tight select-none">
+          {value}
+        </span>
+        <div className="absolute inset-x-0 top-1/2 h-[1.5px] bg-[#161616] border-t border-black/80 pointer-events-none z-20" />
+        <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-2 bg-[#1f1f1f] rounded-r-sm pointer-events-none z-20" />
+        <div className="absolute right-0 top-1/2 -translate-y-1/2 w-1 h-2 bg-[#1f1f1f] rounded-l-sm pointer-events-none z-20" />
+      </div>
+      <span className="text-[10px] uppercase tracking-wider text-zinc-500 mt-1.5">{label}</span>
+    </div>
+  )
+}
+
 function ExamClock({ exam, now, src }) {
   const [t, setT] = useState(now())
-  useEffect(() => { const i = setInterval(() => setT(now()), 50); return () => clearInterval(i) }, [now])
+  useEffect(() => { const i = setInterval(() => setT(now()), 250); return () => clearInterval(i) }, [now])
   const target = exam ? Date.parse(exam + 'T09:00:00+05:30') : null
   const R = target ? Math.max(0, target - t) : 0
   const d = Math.floor(R / 864e5), h = Math.floor(R / 36e5) % 24, m = Math.floor(R / 6e4) % 60, sec = Math.floor(R / 1e3) % 60
-  const fracSec = (R / 1e3) % 60
-  const fracMin = (R / 6e4) % 60
-  const fracHr = (R / 36e5) % 24
   const p2 = (n) => String(n).padStart(2, '0')
-
-  const cx = 190, cy = 190
-  const daySlots = Array.from({ length: 16 }, (_, i) => {
-    const off = i <= 8 ? i : i - 16
-    const val = d + off
-    return { i, angle: i * 22.5, label: val >= 0 ? `${val}d` : '' }
-  })
 
   return (
     <Panel title="Time left for exam" right={<span className="text-[11px] text-zinc-500">{src}</span>}>
       {!exam ? <p className="text-xs text-zinc-500">Set your exam date in the header to start the countdown.</p> : (
         <>
-          <svg viewBox="0 0 380 380" className="w-full max-w-[270px] aspect-square mx-auto block select-none">
-            <defs>
-              <clipPath id="exam-clock-dial">
-                <circle cx={cx} cy={cy} r="181" />
-              </clipPath>
-              <clipPath id="exam-clock-hub">
-                <circle cx={cx} cy={cy} r="13" />
-              </clipPath>
-            </defs>
-
-            <circle cx={cx} cy={cy} r="182" fill="#0c1016" stroke="#0284c7" strokeWidth="1.5" strokeOpacity="0.75" />
-
-            <g clipPath="url(#exam-clock-dial)" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">
-              {/* Days ring */}
-              <g transform={`translate(${cx}, ${cy})`}>
-                {daySlots.map((slot) => slot.label && (
-                  <text
-                    key={slot.i}
-                    x={56}
-                    y={0}
-                    fill="#155e75"
-                    fontSize="8.5"
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    transform={`rotate(${slot.angle})`}
-                  >
-                    {slot.label}
-                  </text>
-                ))}
-              </g>
-
-              {/* Hours ring (00-23) */}
-              <g transform={`translate(${cx}, ${cy}) rotate(${-fracHr * 15})`}>
-                {Array.from({ length: 24 }, (_, i) => (
-                  <text
-                    key={i}
-                    x={92}
-                    y={0}
-                    fill="#155e75"
-                    fontSize="8.5"
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    transform={`rotate(${i * 15})`}
-                  >
-                    {p2(i)}
-                  </text>
-                ))}
-              </g>
-
-              {/* Minutes ring (00-59) */}
-              <g transform={`translate(${cx}, ${cy}) rotate(${-fracMin * 6})`}>
-                {Array.from({ length: 60 }, (_, i) => (
-                  <text
-                    key={i}
-                    x={126}
-                    y={0}
-                    fill="#155e75"
-                    fontSize="7.5"
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    transform={`rotate(${i * 6})`}
-                  >
-                    {p2(i)}
-                  </text>
-                ))}
-              </g>
-
-              {/* Seconds ring (00-59) */}
-              <g transform={`translate(${cx}, ${cy}) rotate(${-fracSec * 6})`}>
-                {Array.from({ length: 60 }, (_, i) => (
-                  <text
-                    key={i}
-                    x={160}
-                    y={0}
-                    fill="#155e75"
-                    fontSize="7.5"
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    transform={`rotate(${i * 6})`}
-                  >
-                    {p2(i)}
-                  </text>
-                ))}
-              </g>
-
-              {/* Active horizontal cyan highlight bar */}
-              <rect x={cx} y={cy - 13} width="184" height="26" fill="#075985" />
-              <line x1={cx} y1={cy - 13} x2="374" y2={cy - 13} stroke="#0ea5e9" strokeWidth="0.75" strokeOpacity="0.65" />
-              <line x1={cx} y1={cy + 13} x2="374" y2={cy + 13} stroke="#0ea5e9" strokeWidth="0.75" strokeOpacity="0.65" />
-
-              <g fill="#f8fafc" fontSize="11.5" fontWeight="600" textAnchor="middle" dominantBaseline="central">
-                <text x={cx + 56} y={cy}>{d}d</text>
-                <text x={cx + 92} y={cy}>{p2(h)}</text>
-                <text x={cx + 109} y={cy} fill="#bae6fd">:</text>
-                <text x={cx + 126} y={cy}>{p2(m)}</text>
-                <text x={cx + 143} y={cy} fill="#bae6fd">:</text>
-                <text x={cx + 160} y={cy}>{p2(sec)}</text>
-              </g>
-            </g>
-
-            {/* Center hub */}
-            <circle cx={cx} cy={cy} r="16" fill="#0c1016" stroke="#0ea5e9" strokeWidth="1.2" strokeOpacity="0.8" />
-            <g clipPath="url(#exam-clock-hub)">
-              <rect x={cx - 13} y={cy - 13} width="26" height="8.7" fill="#FF9933" />
-              <rect x={cx - 13} y={cy - 4.3} width="26" height="8.6" fill="#FFFFFF" />
-              <rect x={cx - 13} y={cy + 4.3} width="26" height="8.7" fill="#138808" />
-              <circle cx={cx} cy={cy} r="3" fill="none" stroke="#000080" strokeWidth="0.8" />
-            </g>
-          </svg>
-
-          <p className="text-center text-[11px] text-zinc-500 mt-2">Counts down to 9:00 AM IST on exam day.</p>
+          <div className="grid grid-cols-4 gap-2.5 pt-1">
+            <FlipUnit value={p2(d)} label="Days" />
+            <FlipUnit value={p2(h)} label="Hours" />
+            <FlipUnit value={p2(m)} label="Minutes" />
+            <FlipUnit value={p2(sec)} label="Seconds" />
+          </div>
+          <p className="text-center text-[11px] text-zinc-500 mt-2.5">Counts down to 9:00 AM IST on exam day.</p>
         </>
       )}
     </Panel>
@@ -908,7 +851,46 @@ function LogNote({ day, setDay }) {
         <button key={n} onClick={() => setDay({ mood: n })} className={`text-sm ${n <= (day.mood || 0) ? 'text-yellow-400' : 'text-zinc-600'}`}>★</button>
       ))}</div>
     }>
-      {area('well', 'What went well')}{area('distract', 'What distracted me')}{area('fix', 'What to fix tomorrow')}
+      {area('well', 'What went well')}{area('distract', 'Mistakes / what distracted me')}{area('fix', 'What to fix tomorrow')}
+    </Panel>
+  )
+}
+
+/* ---------- reflect (yesterday's mistakes, <= 1 day retention) ---------- */
+function Reflect({ yesterday, prevDay, onClear }) {
+  const mistakes = prevDay?.distract?.trim()
+  const fix = prevDay?.fix?.trim()
+  const hasAny = !!(mistakes || fix)
+  const label = new Date(yesterday + 'T00:00').toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })
+
+  return (
+    <Panel
+      title="Reflect"
+      right={
+        <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+          <span>Yesterday · {label}</span>
+          {hasAny && <button onClick={onClear} className="hover:text-red-400">Clear</button>}
+        </div>
+      }
+    >
+      {!hasAny ? (
+        <p className="text-xs text-zinc-500">No mistakes logged yesterday. Older logs (&gt;1 day) are auto-deleted.</p>
+      ) : (
+        <div className="space-y-2 text-xs">
+          {mistakes && (
+            <div className="rounded border border-[#2f2f2f] bg-[#191919] p-2.5">
+              <p className="text-[10px] uppercase tracking-wider text-red-300/80 mb-1">Mistakes / distractions</p>
+              <p className="text-zinc-200 whitespace-pre-wrap leading-relaxed">{mistakes}</p>
+            </div>
+          )}
+          {fix && (
+            <div className="rounded border border-[#2f2f2f] bg-[#191919] p-2.5">
+              <p className="text-[10px] uppercase tracking-wider text-amber-300/80 mb-1">Fix today</p>
+              <p className="text-zinc-200 whitespace-pre-wrap leading-relaxed">{fix}</p>
+            </div>
+          )}
+        </div>
+      )}
     </Panel>
   )
 }

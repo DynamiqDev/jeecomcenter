@@ -11,3 +11,19 @@ input,
 textarea {
   color-scheme: dark;
 }
+
+@keyframes flipTick {
+  0% {
+    transform: perspective(240px) rotateX(-55deg);
+    opacity: 0.75;
+  }
+  100% {
+    transform: perspective(240px) rotateX(0deg);
+    opacity: 1;
+  }
+}
+
+.animate-flip-tick {
+  animation: flipTick 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  transform-origin: center center;
+}
